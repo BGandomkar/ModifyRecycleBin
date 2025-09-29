@@ -128,8 +128,6 @@ try {
 
         # Extract OriginalPath for matching
         # Next 4 bytes (indices 24–27): PathLength
-        $nextFourBytes = $bytes[24..27]
-        $pathLength = [BitConverter]::ToInt32($nextFourBytes, 0)
 
         # File path (index 28 until 00 00, UTF-16LE)
         $pathBytes = @()
