@@ -1,117 +1,209 @@
 <#
 .SYNOPSIS
-    Modifies the deletion time of files in the Windows Recycle Bin based on a search string with wildcard support.
+    Lists or modifies the deletion time of files in the Windows Recycle Bin.
 
 .DESCRIPTION
-    This script searches all partitions for $RECYCLE.BIN folders, recursively finds $I* files,
-    and looks for matches based on the provided search string (either full original path or just filename).
-    The search is case-insensitive, normalizes paths (slashes and whitespace), and supports wildcards (*, ?).
-    For matching files, it updates the FILETIME (deletion time) within the $I* file to the UTC equivalent
-    of the provided NewDeletionTime and sets the file's LastWriteTime and CreationTime to the NewDeletionTime
-    in local time. If the provided NewDeletionTime is incomplete (e.g., date only or missing minutes/seconds),
-    missing time components are randomly generated down to milliseconds. Results and errors are displayed unless
-    the -Silent switch is used, which suppresses all output. When a user deletes a file, the LastWriteTime and
-    CreationTime of the corresponding $I* file in the Recycle Bin are set to the same value as the LastAccessTime
-    of the associated $R* file, and this script mirrors that behavior by updating both the internal FILETIME (in UTC)
-    and the file system properties (in local time). Run as administrator to access the Recycle Bin.
+    Searches all partitions for $RECYCLE.BIN folders, recursively finds $I* metadata files,
+    and matches them against a search string (filename or full original path). Matching is
+    case-insensitive, normalizes slashes and whitespace, and supports wildcards (*, ?).
+
+    Modes:
+    - Modify (default): updates the internal FILETIME (deletion time) in matching $I* files
+      to the UTC equivalent of NewDeletionTime, and sets LastWriteTime and CreationTime on
+      the $I* file to NewDeletionTime (local). By default also updates the paired $R* file
+      timestamps (LastAccessTime, LastWriteTime, CreationTime). Use -SkipRFileUpdate to
+      leave $R* files unchanged. Use -Backup to copy original $I* bytes before writing.
+    - -WhatIf: dry-run; reports what would change without writing files or creating backups.
+    - -List: reports matching entries (current deletion time, paths) without writing.
+
+    Incomplete NewDeletionTime values (e.g. date only) have missing time components randomly
+    generated down to milliseconds. Run as administrator to access the Recycle Bin.
 
 .PARAMETER SearchString
-    The filename or full original path of the deleted file to search for in the Recycle Bin.
-    The search is case-insensitive, normalizes slashes (e.g., "/" or "\") and whitespace, and supports
-    wildcards (* for any characters, ? for a single character).
+    Filename or full original path to match in the Recycle Bin.
+    Case-insensitive; normalizes "/" and "\"; supports * and ?.
     Examples: "example.txt", "*.txt", "C:\Users\*\Documents\*.txt".
 
 .PARAMETER NewDeletionTime
-    The new deletion time to set for matching files, in a valid local time date format (e.g., "2025-09-03 17:00:00").
-    Supports formats like "YYYY-MM-DD HH:MM:SS", "MM/DD/YYYY HH:MM", or "YYYY-MM-DD". The input is interpreted
-    as local time; the internal FILETIME in the $I* file is set to the UTC equivalent, while the file's
-    LastWriteTime and CreationTime are set to the local time. If time components are missing (e.g., date only
-    or hour only), they are randomly generated down to milliseconds. Invalid formats will trigger an error
-    unless -Silent is specified.
+    New deletion time as local time (required for Modify / -WhatIf; not used with -List).
+    Examples: "YYYY-MM-DD HH:MM:SS", "MM/DD/YYYY HH:MM", "YYYY-MM-DD".
+    Internal FILETIME is stored as UTC; filesystem timestamps use local time.
+    Missing time components are randomly generated unless -Silent suppresses related errors.
+
+.PARAMETER List
+    List matching Recycle Bin entries only. Does not modify files. NewDeletionTime is not required.
 
 .PARAMETER Silent
-    Suppresses all output, including errors (e.g., invalid date format, file access issues) and the result table.
-    Use this switch for quiet operation.
+    Suppresses warnings, errors, and the result table.
+
+.PARAMETER SkipRFileUpdate
+    Do not update timestamps on the paired $R* content file. By default $R* is updated.
+
+.PARAMETER Backup
+    Before modifying an $I* file, copy its original bytes under BackupPath.
+
+.PARAMETER BackupPath
+    Root directory for $I* backups. Default: .\RecycleBinBackups\<yyyyMMdd-HHmmss>\
+    under the current location. Files are stored as drive\SID\$I* name under that root.
 
 .EXAMPLE
     .\ModifyRecycleBin.ps1 -SearchString "example.txt" -NewDeletionTime "2025-09-03 17:00:00"
-    Searches for a deleted file named "example.txt" (case-insensitive) and sets its internal FILETIME to
-    the UTC equivalent of September 3, 2025, 5:00 PM local time, and its LastWriteTime and CreationTime
-    to 5:00 PM local time. Displays results or a "no matches" message.
+    Modifies matching $I* (and paired $R*) deletion-related timestamps.
+
+.EXAMPLE
+    .\ModifyRecycleBin.ps1 -SearchString "*.txt" -NewDeletionTime "2025-09-03 17:00:00" -WhatIf
+    Dry-run: shows what would be modified without writing.
+
+.EXAMPLE
+    .\ModifyRecycleBin.ps1 -SearchString "*.txt" -List
+    Lists matching deleted files and their current deletion times.
+
+.EXAMPLE
+    .\ModifyRecycleBin.ps1 -SearchString "report.docx" -NewDeletionTime "2025-09-03 17:00:00" -Backup
+    Backs up original $I* bytes, then modifies $I* and paired $R*.
+
+.EXAMPLE
+    .\ModifyRecycleBin.ps1 -SearchString "notes.txt" -NewDeletionTime "2025-09-03 17:00:00" -SkipRFileUpdate
+    Updates $I* only; leaves the paired $R* file timestamps unchanged.
+
+.EXAMPLE
+    .\ModifyRecycleBin.ps1 -SearchString "C:/Users/*/Documents/*.txt" -NewDeletionTime "2025-09-03 17:00" -Backup -BackupPath "D:\Backups\RB"
+    Path wildcard match; backs up original $I* bytes under D:\Backups\RB\<yyyyMMdd-HHmmss>\.
 
 .EXAMPLE
     .\ModifyRecycleBin.ps1 -SearchString "*.txt" -NewDeletionTime "2025-09-03" -Silent
-    Searches for all .txt files (case-insensitive), sets their internal FILETIME to the UTC equivalent
-    of 2025-09-03 with random hours, minutes, seconds, and milliseconds (e.g., 2025-09-03 14:27:19.583 UTC),
-    and their LastWriteTime and CreationTime to the same local time, running silently.
-
-.EXAMPLE
-    .\ModifyRecycleBin.ps1 -SearchString "C:/Users/*/Documents/*.txt" -NewDeletionTime "2025-09-03 17:00"
-    Searches for all .txt files in any user's Documents folder (case-insensitive, normalizes slashes), sets their
-    internal FILETIME to the UTC equivalent of 2025-09-03 17:00 with random minutes, seconds, and milliseconds
-    (e.g., 2025-09-03 17:42:09.127 UTC), and their LastWriteTime and CreationTime to the local time equivalent.
-
-.EXAMPLE
-    .\ModifyRecycleBin.ps1 -SearchString "File?.txt" -NewDeletionTime "2025-09-03 17:5:30"
-    Searches for files like "File1.txt" or "File2.txt" and sets their internal FILETIME to the UTC
-    equivalent of 2025-09-03 17:05:30 local time, and their LastWriteTime and CreationTime to 17:05:30 local time.
-
-.EXAMPLE
-    .\ModifyRecycleBin.ps1 -SearchString "File.txt" -NewDeletionTime "invalid-date" -Silent
-    Attempts to parse an invalid date, but with -Silent, exits without displaying the error.
+    Modifies all matching .txt entries with randomized missing time parts, with no console output.
 
 .NOTES
-    Version: 1.0.7.6
+    Version: 1.1.0
     Author: Recycle Bin Modifier Developer
     Requires: Administrative privileges to access $RECYCLE.BIN.
-    Date formats must be valid (e.g., "2025-09-03 17:00:00"). Invalid formats are suppressed with -Silent.
-    Incomplete time inputs (e.g., date only, missing seconds, or single-digit minutes/seconds) will have
-    missing components randomly generated. The NewDeletionTime is interpreted as local time; the internal
-    FILETIME is set to UTC, while LastWriteTime and CreationTime are set to local time.
-    Search is case-insensitive, normalizes paths, and supports wildcards (*, ?) for flexible matching.
-    Access errors (e.g., denied access to Recycle Bin subfolders) are handled gracefully to continue searching other drives.
+    -WhatIf is provided by SupportsShouldProcess (dry-run; no writes, no backups written).
+    -List and -WhatIf never modify Recycle Bin files.
+    $I* and $R* share the same suffix in the same SID folder (e.g. $Iabc -> $Rabc).
+    Search is case-insensitive with path normalization and wildcards (*, ?).
+    Access errors are handled so other drives can still be searched.
 #>
 
+[CmdletBinding(DefaultParameterSetName = 'Modify', SupportsShouldProcess = $true)]
 param(
-    [Parameter(Mandatory=$true)]
+    [Parameter(Mandatory = $true, ParameterSetName = 'Modify')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'List')]
     [string]$SearchString,
-    [Parameter(Mandatory=$true)]
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'Modify')]
     [string]$NewDeletionTime,
-    [Parameter(Mandatory=$false)]
-    [switch]$Silent
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'List')]
+    [switch]$List,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$Silent,
+
+    [Parameter(Mandatory = $false, ParameterSetName = 'Modify')]
+    [switch]$SkipRFileUpdate,
+
+    [Parameter(Mandatory = $false, ParameterSetName = 'Modify')]
+    [switch]$Backup,
+
+    [Parameter(Mandatory = $false, ParameterSetName = 'Modify')]
+    [string]$BackupPath
 )
 
+function Get-PairedRFilePath {
+    param([string]$IFilePath)
+    $dir = Split-Path -Parent $IFilePath
+    $name = Split-Path -Leaf $IFilePath
+    if ($name -like '$I*') {
+        $rName = '$R' + $name.Substring(2)
+        return (Join-Path $dir $rName)
+    }
+    return $null
+}
+
+function Get-BackupTargetPath {
+    param(
+        [string]$IFilePath,
+        [string]$SessionBackupRoot
+    )
+    # Prefer path under $RECYCLE.BIN (drive\SID\$I*)
+    $marker = '$RECYCLE.BIN'
+    $idx = $IFilePath.IndexOf($marker, [System.StringComparison]::OrdinalIgnoreCase)
+    if ($idx -ge 0) {
+        $relative = $IFilePath.Substring($idx + $marker.Length).TrimStart('\', '/')
+        $driveLetter = $IFilePath.Substring(0, 1)
+        return (Join-Path $SessionBackupRoot (Join-Path $driveLetter $relative))
+    }
+    $safeName = ($IFilePath -replace '[:\\\/]', '_')
+    return (Join-Path $SessionBackupRoot $safeName)
+}
+
+function New-ResultObject {
+    param(
+        [string]$RecycleFile,
+        [string]$OriginalPath,
+        [string]$RFile,
+        [string]$Status,
+        $CurrentDeletionTime,
+        $NewDeletionTime,
+        [string]$BackupFilePath
+    )
+    return [PSCustomObject]@{
+        RecycleFile         = $RecycleFile
+        OriginalPath        = $OriginalPath
+        RFile               = $RFile
+        Status              = $Status
+        CurrentDeletionTime = $CurrentDeletionTime
+        NewDeletionTime     = $NewDeletionTime
+        BackupPath          = $BackupFilePath
+    }
+}
+
 try {
-    # Validate and convert NewDeletionTime to datetime (local time)
+    $isListMode = $PSCmdlet.ParameterSetName -eq 'List'
     $parsedDateTime = $null
-    try {
-        $parsedDateTime = [datetime]::Parse($NewDeletionTime)
-    } catch {
-        if (-not $Silent) {
-            Write-Error "Invalid date format for NewDeletionTime: '$NewDeletionTime'. Please use a valid date format (e.g., '2025-09-03 17:00:00')."
+    $newFileTime = [long]0
+    $sessionBackupRoot = $null
+
+    if (-not $isListMode) {
+        try {
+            $parsedDateTime = [datetime]::Parse($NewDeletionTime)
+        } catch {
+            if (-not $Silent) {
+                Write-Error "Invalid date format for NewDeletionTime: '$NewDeletionTime'. Please use a valid date format (e.g., '2025-09-03 17:00:00')."
+            }
+            exit 1
         }
-        exit
+
+        # Check if time components are missing and randomly generate them
+        $timePart = $NewDeletionTime -replace '.*\s+', ''
+        if ($timePart.Length -lt 12) {
+            $random = New-Object System.Random
+            $hours = if ($parsedDateTime.Hour -eq 0 -and -not $timePart) { $random.Next(0, 24) } else { $parsedDateTime.Hour }
+            $minutes = if ($parsedDateTime.Minute -eq 0 -and -not ($timePart -match ':\d{1,2}')) { $random.Next(0, 60) } else { $parsedDateTime.Minute }
+            $seconds = if ($parsedDateTime.Second -eq 0 -and -not ($timePart -match ':\d{1,2}:\d{1,2}')) { $random.Next(0, 60) } else { $parsedDateTime.Second }
+            $milliseconds = if ($parsedDateTime.Second -eq 0) { $random.Next(0, 1000) } else { $parsedDateTime.Millisecond }
+            $parsedDateTime = New-Object DateTime($parsedDateTime.Year, $parsedDateTime.Month, $parsedDateTime.Day, $hours, $minutes, $seconds, $milliseconds)
+        }
+
+        $newFileTime = $parsedDateTime.ToFileTime()
+
+        if ($Backup) {
+            $root = if ($BackupPath) { $BackupPath } else { Join-Path (Get-Location) 'RecycleBinBackups' }
+            $sessionBackupRoot = Join-Path $root (Get-Date -Format 'yyyyMMdd-HHmmss')
+        }
     }
 
-    # Check if time components are missing and randomly generate them
-    $timePart = $NewDeletionTime -replace '.*\s+', ''
-    if ($timePart.Length -lt 12) {
-        # Generate random time components
-        $random = New-Object System.Random
-        $hours = if ($parsedDateTime.Hour -eq 0 -and -not $timePart) { $random.Next(0, 24) } else { $parsedDateTime.Hour }
-        $minutes = if ($parsedDateTime.Minute -eq 0 -and -not ($timePart -match ':\d{1,2}')) { $random.Next(0, 60) } else { $parsedDateTime.Minute }
-        $seconds = if ($parsedDateTime.Second -eq 0 -and -not ($timePart -match ':\d{1,2}:\d{1,2}')) { $random.Next(0, 60) } else { $parsedDateTime.Second }
-        $milliseconds = if ($parsedDateTime.Second -eq 0) { $random.Next(0, 1000) } else { $parsedDateTime.Millisecond }
-        # Reconstruct datetime with random components (local time)
-        $parsedDateTime = New-Object DateTime($parsedDateTime.Year, $parsedDateTime.Month, $parsedDateTime.Day, $hours, $minutes, $seconds, $milliseconds)
-    }
-
-    function ParseAndModifyRecycleFile {
+    function Invoke-RecycleInfoFile {
         param(
             [string]$FilePath,
             [string]$TargetSearchString,
             [long]$NewFileTimeValue,
-            [datetime]$NewDateTime
+            [datetime]$NewDateTime,
+            [bool]$ListOnly,
+            [bool]$DoBackup,
+            [string]$BackupRoot,
+            [bool]$UpdateRFile
         )
 
         try {
@@ -126,15 +218,12 @@ try {
             return $null
         }
 
-        # Extract OriginalPath for matching
-        # Next 4 bytes (indices 24–27): PathLength
-
         # File path (index 28 until 00 00, UTF-16LE)
-        $pathBytes = @()
+        $pathBytes = New-Object System.Collections.Generic.List[byte]
         $i = 28
         while ($i -lt ($bytes.Length - 1) -and -not ($bytes[$i] -eq 0x00 -and $bytes[$i + 1] -eq 0x00)) {
-            $pathBytes += $bytes[$i]
-            $pathBytes += $bytes[$i + 1]
+            [void]$pathBytes.Add($bytes[$i])
+            [void]$pathBytes.Add($bytes[$i + 1])
             $i += 2
         }
         if ($i -ge $bytes.Length - 1 -or -not ($bytes[$i] -eq 0x00 -and $bytes[$i + 1] -eq 0x00)) {
@@ -142,13 +231,11 @@ try {
             return $null
         }
 
-        $originalPath = [System.Text.Encoding]::Unicode.GetString($pathBytes).TrimEnd("`0").Trim()
+        $originalPath = [System.Text.Encoding]::Unicode.GetString($pathBytes.ToArray()).TrimEnd("`0").Trim()
 
-        # Normalize paths: convert slashes to backslashes, trim whitespace
         $normalizedOriginalPath = $originalPath -replace '/', '\' -replace '\s+', ' '
         $normalizedTargetSearchString = $TargetSearchString -replace '/', '\' -replace '\s+', ' '
 
-        # Determine match type
         $isFullPathMatch = $normalizedTargetSearchString.Contains('\')
         $match = $false
         if ($isFullPathMatch) {
@@ -166,37 +253,89 @@ try {
             return $null
         }
 
-        # Modify FILETIME (bytes 16-23) with UTC time
+        $currentFileTimeValue = [BitConverter]::ToInt64($bytes, 16)
+        $currentDeletionTime = $null
+        try {
+            $currentDeletionTime = [DateTime]::FromFileTime($currentFileTimeValue)
+        } catch {
+            $currentDeletionTime = $null
+        }
+
+        $rFilePath = Get-PairedRFilePath -IFilePath $FilePath
+        $rFileDisplay = if ($rFilePath -and (Test-Path -LiteralPath $rFilePath)) { $rFilePath } else { '' }
+
+        if ($ListOnly) {
+            return (New-ResultObject -RecycleFile $FilePath -OriginalPath $originalPath -RFile $rFileDisplay `
+                -Status 'Listed' -CurrentDeletionTime $currentDeletionTime -NewDeletionTime $null -BackupFilePath '')
+        }
+
+        $backupTarget = ''
+        if ($DoBackup -and $BackupRoot) {
+            $backupTarget = Get-BackupTargetPath -IFilePath $FilePath -SessionBackupRoot $BackupRoot
+        }
+
+        $rNote = if ($UpdateRFile) { 'and R*' } else { 'I* only' }
+        if (-not $PSCmdlet.ShouldProcess($FilePath, "Set deletion time to $NewDateTime ($rNote)")) {
+            return (New-ResultObject -RecycleFile $FilePath -OriginalPath $originalPath -RFile $rFileDisplay `
+                -Status 'WouldModify' -CurrentDeletionTime $currentDeletionTime -NewDeletionTime $NewDateTime `
+                -BackupFilePath $(if ($DoBackup) { $backupTarget } else { '' }))
+        }
+
+        if ($DoBackup) {
+            try {
+                $backupDir = Split-Path -Parent $backupTarget
+                if (-not (Test-Path -LiteralPath $backupDir)) {
+                    New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
+                }
+                [System.IO.File]::WriteAllBytes($backupTarget, $bytes)
+            } catch {
+                if (-not $Silent) { Write-Warning "Backup failed for $FilePath. Error: $_. Skipping modify." }
+                return (New-ResultObject -RecycleFile $FilePath -OriginalPath $originalPath -RFile $rFileDisplay `
+                    -Status "Backup failed: $_" -CurrentDeletionTime $currentDeletionTime -NewDeletionTime $NewDateTime `
+                    -BackupFilePath $backupTarget)
+            }
+        }
+
         $newTimeBytes = [BitConverter]::GetBytes($NewFileTimeValue)
         for ($j = 0; $j -lt 8; $j++) {
             $bytes[16 + $j] = $newTimeBytes[$j]
         }
 
-        # Write back to file and update LastWriteTime and CreationTime with local time
         try {
             [System.IO.File]::WriteAllBytes($FilePath, $bytes)
             [System.IO.File]::SetLastWriteTime($FilePath, $NewDateTime)
             [System.IO.File]::SetCreationTime($FilePath, $NewDateTime)
-            return [PSCustomObject]@{
-                RecycleFile = $FilePath
-                OriginalPath = $originalPath
-                Status = "Modified"
-                NewDeletionTime = $NewDateTime
-            }
         } catch {
             if (-not $Silent) { Write-Warning "Failed to modify file or update timestamps: $FilePath. Error: $_" }
-            return [PSCustomObject]@{
-                RecycleFile = $FilePath
-                OriginalPath = $originalPath
-                Status = "Failed to modify: $_"
-                NewDeletionTime = $NewDateTime
+            return (New-ResultObject -RecycleFile $FilePath -OriginalPath $originalPath -RFile $rFileDisplay `
+                -Status "Failed to modify: $_" -CurrentDeletionTime $currentDeletionTime -NewDeletionTime $NewDateTime `
+                -BackupFilePath $(if ($DoBackup) { $backupTarget } else { '' }))
+        }
+
+        $status = 'Modified'
+        if ($UpdateRFile) {
+            if ($rFilePath -and (Test-Path -LiteralPath $rFilePath)) {
+                try {
+                    [System.IO.File]::SetLastAccessTime($rFilePath, $NewDateTime)
+                    [System.IO.File]::SetLastWriteTime($rFilePath, $NewDateTime)
+                    [System.IO.File]::SetCreationTime($rFilePath, $NewDateTime)
+                } catch {
+                    if (-not $Silent) { Write-Warning "Failed to update paired R* file: $rFilePath. Error: $_" }
+                    $status = "Modified (R* update failed: $_)"
+                }
+            } else {
+                if (-not $Silent) { Write-Warning "Paired R* file not found for: $FilePath" }
+                $status = 'Modified (R* missing)'
+                $rFileDisplay = ''
             }
         }
+
+        return (New-ResultObject -RecycleFile $FilePath -OriginalPath $originalPath -RFile $rFileDisplay `
+            -Status $status -CurrentDeletionTime $currentDeletionTime -NewDeletionTime $NewDateTime `
+            -BackupFilePath $(if ($DoBackup) { $backupTarget } else { '' }))
     }
 
     $results = @()
-    $newFileTime = $parsedDateTime.ToFileTime()
-
     $drives = Get-PSDrive -PSProvider FileSystem
 
     foreach ($drive in $drives) {
@@ -205,9 +344,17 @@ try {
             try {
                 $files = Get-ChildItem -Path $recycleBin -Recurse -Filter '$I*' -Force -File -ErrorAction SilentlyContinue
                 foreach ($file in $files) {
-                    $modified = ParseAndModifyRecycleFile -FilePath $file.FullName -TargetSearchString $SearchString -NewFileTimeValue $newFileTime -NewDateTime $parsedDateTime
-                    if ($modified) {
-                        $results += $modified
+                    $processed = Invoke-RecycleInfoFile `
+                        -FilePath $file.FullName `
+                        -TargetSearchString $SearchString `
+                        -NewFileTimeValue $newFileTime `
+                        -NewDateTime $(if ($parsedDateTime) { $parsedDateTime } else { [datetime]::MinValue }) `
+                        -ListOnly $isListMode `
+                        -DoBackup ([bool]$Backup) `
+                        -BackupRoot $sessionBackupRoot `
+                        -UpdateRFile (-not $SkipRFileUpdate)
+                    if ($processed) {
+                        $results += $processed
                     }
                 }
             } catch {
